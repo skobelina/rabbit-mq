@@ -5,15 +5,17 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
+	rabbit "github.com/skobelina/softcery"
 	"github.com/streadway/amqp"
 )
 
 type AddFile struct {
-	FileName string
-	IdFile   string
+	NewFileName string
 }
 
 func handleError(err error, msg string) {
@@ -35,14 +37,16 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-	fmt.Printf("Uploaded File: %+v id_file: %s \n", handler.Filename, id.String())
-	// fmt.Printf("File Size: %+v\n", handler.Size)
+	fmt.Printf("Uploaded File: %+v\n", handler.Filename)
+	fmt.Printf("File Size: %+v\n", handler.Size)
 	// fmt.Printf("MIME Header: %+v\n", handler.Header)
 
-	tempFile, err := ioutil.TempFile("storage", "upload-*.jpg")
+	tempFile, err := ioutil.TempFile("../storage", ("upload-" + id.String() + "*.jpg"))
+	// tempFile, err := ioutil.TempFile("../storage", "upload-*.jpg")
 	if err != nil {
 		fmt.Println(err)
 	}
+	NewFileName := tempFile.Name()[11:]
 	defer tempFile.Close()
 
 	fileBytes, err := ioutil.ReadAll(file)
@@ -65,9 +69,9 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 	queue, err := amqpChannel.QueueDeclare("add", true, false, false, false, nil)
 	handleError(err, "Could not declare `add` queue")
 
-	// rand.Seed(time.Now().UnixNano())
+	rand.Seed(time.Now().UnixNano())
 
-	addFile := AddFile{FileName: handler.Filename, IdFile: id.String()}
+	addFile := AddFile{NewFileName: NewFileName}
 	body, err := json.Marshal(addFile)
 	if err != nil {
 		handleError(err, "Error encoding JSON")
@@ -78,12 +82,10 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 		ContentType:  "text/plain",
 		Body:         body,
 	})
-
 	if err != nil {
 		log.Fatalf("Error publishing file: %s", err)
 	}
-
-	log.Printf("AddFile: %s-%s", addFile.FileName, addFile.IdFile)
+	log.Printf("AddFile: %s", NewFileName)
 }
 
 func setupRoutes() {

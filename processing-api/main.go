@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 
+	rabbit "github.com/skobelina/softcery"
 	"github.com/streadway/amqp"
 )
 
@@ -15,8 +16,7 @@ func handleError(err error, msg string) {
 }
 
 type AddFile struct {
-	FileName string
-	IdFile   string
+	NewFileName string
 }
 
 func main() {
