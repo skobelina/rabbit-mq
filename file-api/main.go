@@ -2,15 +2,16 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io/ioutil"
 	"log"
-	"math/rand"
 	"net/http"
-	"time"
+	"os"
+	"path"
+	"strings"
 
 	"github.com/google/uuid"
-	rabbit "github.com/skobelina/softcery"
+	rabbit "github.com/skobelina/rabbit-mq"
 	"github.com/streadway/amqp"
 )
 
@@ -18,81 +19,109 @@ type AddFile struct {
 	NewFileName string
 }
 
-func handleError(err error, msg string) {
-	if err != nil {
-		log.Fatalf("%s: %s", msg, err)
-	}
-
+type FileService struct {
+	queue   amqp.Queue
+	channel *amqp.Channel
 }
 
-func uploadFile(w http.ResponseWriter, r *http.Request) {
-	id := uuid.New()
-	fmt.Fprintf(w, "Uploading File\n")
+type JsonMessage struct {
+	Message string `json:"message"`
+}
 
+func main() {
+	srv := new(FileService)
+	conn, err := amqp.Dial(rabbit.Config.AMQPConnectionURL)
+	if err != nil {
+		log.Fatal("Can't connect to AMQP", err)
+	}
+	defer conn.Close()
+
+	srv.channel, err = conn.Channel()
+	if err != nil {
+		log.Fatal("Can't create a amqpChannel", err)
+	}
+	defer srv.channel.Close()
+
+	srv.queue, err = srv.channel.QueueDeclare("add", true, false, false, false, nil)
+	if err != nil {
+		log.Fatal("Could not declare `add` queue", err)
+	}
+
+	http.HandleFunc("/upload", srv.uploadFile)
+	http.ListenAndServe(":8080", nil)
+}
+
+func (s *FileService) uploadFile(w http.ResponseWriter, r *http.Request) {
 	r.ParseMultipartForm(10 << 20)
 	file, handler, err := r.FormFile("myFile")
 	if err != nil {
-		fmt.Println("Error Retrieving the File")
-		fmt.Println(err)
+		handlerError("Error retrieving the file", err, w)
 		return
 	}
 	defer file.Close()
-	fmt.Printf("Uploaded File: %+v\n", handler.Filename)
-	fmt.Printf("File Size: %+v\n", handler.Size)
-	// fmt.Printf("MIME Header: %+v\n", handler.Header)
-
-	tempFile, err := ioutil.TempFile("../storage", ("upload-" + id.String() + "*.jpg"))
-	// tempFile, err := ioutil.TempFile("../storage", "upload-*.jpg")
-	if err != nil {
-		fmt.Println(err)
-	}
-	NewFileName := tempFile.Name()[11:]
-	defer tempFile.Close()
 
 	fileBytes, err := ioutil.ReadAll(file)
 	if err != nil {
-		fmt.Println(err)
+		handlerError("Error reading file", err, w)
+		return
 	}
-	tempFile.Write(fileBytes)
 
-	fmt.Fprintf(w, "Successfully Uploaded File\n")
+	format, ok := getFormat(handler.Filename)
+	if !ok {
+		handlerError("Can't upload file", errors.New("Wrong format"), w)
+		return
+	}
 
-	conn, err := amqp.Dial(rabbit.Config.AMQPConnectionURL)
-	handleError(err, "Can't connect to AMQP")
-	defer conn.Close()
+	log.Printf("Uploaded File: %+v\n", handler.Filename)
 
-	amqpChannel, err := conn.Channel()
-	handleError(err, "Can't create a amqpChannel")
+	filename := strings.Replace(uuid.New().String(), "-", "", -1) + format
+	temp, err := os.Create(path.Join("./storage", filename))
+	if err != nil {
+		handlerError("Error relacing file", err, w)
+		return
+	}
+	defer temp.Close()
 
-	defer amqpChannel.Close()
+	err = ioutil.WriteFile(path.Join("./storage", filename), fileBytes, os.ModePerm)
+	if err != nil {
+		handlerError("Error writing file", err, w)
+		return
+	}
 
-	queue, err := amqpChannel.QueueDeclare("add", true, false, false, false, nil)
-	handleError(err, "Could not declare `add` queue")
-
-	rand.Seed(time.Now().UnixNano())
-
-	addFile := AddFile{NewFileName: NewFileName}
+	addFile := AddFile{NewFileName: filename}
 	body, err := json.Marshal(addFile)
 	if err != nil {
-		handleError(err, "Error encoding JSON")
+		handlerError("Error encoding JSON", err, w)
+		return
 	}
 
-	err = amqpChannel.Publish("", queue.Name, false, false, amqp.Publishing{
+	err = s.channel.Publish("", s.queue.Name, false, false, amqp.Publishing{
 		DeliveryMode: amqp.Persistent,
 		ContentType:  "text/plain",
 		Body:         body,
 	})
 	if err != nil {
-		log.Fatalf("Error publishing file: %s", err)
+		handlerError("Error publishing file", err, w)
+		return
 	}
-	log.Printf("AddFile: %s", NewFileName)
+	resp, _ := json.Marshal(&JsonMessage{"File upload succefully"})
+	w.Write(resp)
+	w.Header().Set("Content-Type", "application/json")
 }
 
-func setupRoutes() {
-	http.HandleFunc("/upload", uploadFile)
-	http.ListenAndServe(":8080", nil)
+func handlerError(message string, err error, w http.ResponseWriter) {
+	log.Printf("%s: %s", message, err.Error())
+	body, _ := json.Marshal(&JsonMessage{message})
+	w.Write(body)
+	w.Header().Set("Content-Type", "application/json")
 }
 
-func main() {
-	setupRoutes()
+func getFormat(str string) (string, bool) {
+	tokens := strings.Split(str, ".")
+	switch tokens[len(tokens)-1] {
+	case "jpg", "png", "jpeg":
+		return "." + tokens[len(tokens)-1], true
+	default:
+		return "", false
+	}
 }
